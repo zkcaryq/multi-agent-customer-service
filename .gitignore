@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Milvus local data
+*.db
+*.db.lock
+data/.milvus/
+data/.index/
+
+# 项目文档
+前端设计规范.md
+数据库设计文档.md
+立项文档.md
+
+# Node
+node_modules/
+
+# 测试与运行产物
+.pytest_cache/
+*.log
+coverage/
+htmlcov/
+
+# 向量库/索引本地数据
+backend/data/
+backend/.venv/

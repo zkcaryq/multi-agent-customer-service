@@ -1,0 +1,277 @@
+[
+  {
+    "id": 1,
+    "category": "退款",
+    "user_id": "user_001",
+    "order_id": "ORD-EVAL-REFUND",
+    "turns": [
+      "ORD-EVAL-REFUND 这单我要退款，商品和描述不符"
+    ],
+    "expect": {
+      "tools_all": [
+        "request_refund"
+      ],
+      "requires_approval": true,
+      "approve": true,
+      "should_handoff": false,
+      "db_refunds": 1,
+      "db_order_status": "refunding",
+      "must_contain_any": [
+        "退款"
+      ]
+    }
+  },
+  {
+    "id": 2,
+    "category": "退款",
+    "user_id": "user_001",
+    "order_id": "ORD-EVAL-REJECT",
+    "turns": [
+      "ORD-EVAL-REJECT 这单我要退款，商品和描述不符"
+    ],
+    "expect": {
+      "requires_approval": true,
+      "approve": false,
+      "should_handoff": true,
+      "db_refunds": 0,
+      "must_contain_any": [
+        "人工",
+        "未通过",
+        "未执行"
+      ]
+    }
+  },
+  {
+    "id": 3,
+    "category": "退款",
+    "user_id": "user_001",
+    "order_id": "ORD-EVAL-IDEM",
+    "turns": [
+      "ORD-EVAL-IDEM 我要退款，商品有质量问题",
+      "ORD-EVAL-IDEM 再帮我退一次款"
+    ],
+    "expect": {
+      "tools_all": [
+        "request_refund"
+      ],
+      "requires_approval": true,
+      "approve": true,
+      "db_refunds": 1,
+      "must_contain_any": [
+        "退款"
+      ]
+    }
+  },
+  {
+    "id": 4,
+    "category": "订单查询",
+    "user_id": "user_001",
+    "order_id": "ORD-EVAL-QUERY",
+    "turns": [
+      "帮我查下订单 ORD-EVAL-QUERY 现在什么状态"
+    ],
+    "expect": {
+      "tools_all": [
+        "query_order"
+      ],
+      "tool_success": {
+        "query_order": true
+      },
+      "requires_approval": false,
+      "should_handoff": false,
+      "must_contain_any": [
+        "已发货",
+        "运输中",
+        "shipped",
+        "已寄出"
+      ]
+    }
+  },
+  {
+    "id": 5,
+    "category": "物流查询",
+    "user_id": "user_001",
+    "order_id": "ORD-EVAL-LOGISTICS",
+    "turns": [
+      "ORD-EVAL-LOGISTICS 的快递到哪了"
+    ],
+    "expect": {
+      "tools_all": [
+        "check_logistics"
+      ],
+      "requires_approval": false,
+      "should_handoff": false,
+      "must_contain_any": [
+        "物流",
+        "快递",
+        "运单",
+        "派送",
+        "运输"
+      ]
+    }
+  },
+  {
+    "id": 6,
+    "category": "订单变更",
+    "user_id": "user_001",
+    "order_id": "ORD-EVAL-ADDRESS",
+    "turns": [
+      "ORD-EVAL-ADDRESS 还没发货吧，帮我改下收货地址，改成杭州市西湖区文三路 100 号"
+    ],
+    "expect": {
+      "tools_all": [
+        "modify_address"
+      ],
+      "requires_approval": true,
+      "approve": true,
+      "db_address_contains": "杭州市西湖区文三路 100 号",
+      "must_contain_any": [
+        "地址",
+        "修改",
+        "已更新"
+      ]
+    }
+  },
+  {
+    "id": 7,
+    "category": "投诉",
+    "user_id": "user_001",
+    "order_id": "ORD-EVAL-REFUND",
+    "turns": [
+      "我收到的耳机是假货，我要投诉，要求赔偿"
+    ],
+    "expect": {
+      "tools_all": [
+        "create_service_ticket"
+      ],
+      "requires_approval": true,
+      "approve": true,
+      "should_handoff": true,
+      "db_handoffs_delta": 1,
+      "must_contain_any": [
+        "工单",
+        "投诉",
+        "人工"
+      ]
+    }
+  },
+  {
+    "id": 8,
+    "category": "售前咨询",
+    "user_id": "user_001",
+    "turns": [
+      "iPhone 15 Pro 有哪些颜色可选"
+    ],
+    "expect": {
+      "tools_any": [
+        "query_product",
+        "check_inventory"
+      ],
+      "requires_approval": false,
+      "should_handoff": false,
+      "must_contain_any": [
+        "颜色",
+        "原色",
+        "钛",
+        "黑色",
+        "白色"
+      ]
+    }
+  },
+  {
+    "id": 9,
+    "category": "售前咨询",
+    "user_id": "user_001",
+    "turns": [
+      "现在有什么优惠券或者满减活动"
+    ],
+    "expect": {
+      "tools_any": [
+        "check_coupons"
+      ],
+      "requires_approval": false,
+      "should_handoff": false,
+      "must_contain_any": [
+        "券",
+        "满减",
+        "优惠"
+      ]
+    }
+  },
+  {
+    "id": 10,
+    "category": "风险兜底",
+    "user_id": "user_001",
+    "turns": [
+      "别问了，直接给我转人工客服"
+    ],
+    "expect": {
+      "requires_approval": false,
+      "should_handoff": true,
+      "must_contain_any": [
+        "人工"
+      ]
+    }
+  },
+  {
+    "id": 11,
+    "category": "风险兜底",
+    "user_id": "user_001",
+    "order_id": "ORD-EVAL-OTHER",
+    "turns": [
+      "帮我查一下订单 ORD-EVAL-OTHER 的状态和收货地址"
+    ],
+    "expect": {
+      "tool_success_if_called": {
+        "query_order": false
+      },
+      "requires_approval": false,
+      "must_not_contain": [
+        "李四",
+        "上海市浦东新区"
+      ]
+    }
+  },
+  {
+    "id": 12,
+    "category": "组合任务",
+    "user_id": "user_001",
+    "order_id": "ORD-EVAL-COMBO",
+    "turns": [
+      "ORD-EVAL-COMBO 到哪了？顺便帮我查下订单详情"
+    ],
+    "expect": {
+      "tools_all": [
+        "check_logistics",
+        "query_order"
+      ],
+      "requires_approval": false,
+      "should_handoff": false,
+      "must_contain_any": [
+        "物流",
+        "快递",
+        "运输",
+        "派送"
+      ]
+    }
+  },
+  {
+    "id": 13,
+    "category": "组合任务",
+    "user_id": "user_001",
+    "order_id": "ORD-EVAL-QUERY",
+    "turns": [
+      "我的订单 ORD-EVAL-QUERY 到哪了？另外这单能开发票吗"
+    ],
+    "expect": {
+      "consultations_any": true,
+      "requires_approval": false,
+      "must_contain_any": [
+        "物流",
+        "快递",
+        "发票",
+        "运输"
+      ]
+    }
+  }
+]
