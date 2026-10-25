@@ -96,7 +96,7 @@ backend/
 │   ├── tools/                   # registry（校验/注入上下文）、executor（超时/重试/熔断）、crm
 │   ├── evaluation/              # 离线评测指标（意图准确率、检索 hit/MRR、转人工判定）
 │   ├── api/                     # chat / websocket / admin / auth
-│   └── models/                  # database.py（33 表）+ engine.py（async SQLAlchemy）
+│   └── models/                  # database.py（32 表）+ engine.py（async SQLAlchemy）
 ├── scripts/                     # 注入、造数、9 个自检脚本、离线评测
 ├── tests/                       # pytest：单元测试 + 集成自检（无 PG 自动跳过）
 ├── run.py                       # Windows 推荐入口（Selector 事件循环，见文件头）

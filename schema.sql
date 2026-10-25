@@ -1,5 +1,7 @@
 -- ============================================================================
--- CogniFlow 电商智能客服 — 数据库建表脚本
+-- 基于 Multi-Agent 的智能客服业务平台 — 数据库建表脚本
+-- 注意：schema 的唯一真源是 backend/app/models/database.py（ORM 元数据），
+--       本文件是给人看的 DDL 快照，改表结构请先改 ORM 再同步这里
 -- 数据库：PostgreSQL 15+
 -- 编码：UTF-8
 -- ============================================================================
@@ -353,22 +355,7 @@ CREATE TABLE message_traces (
 
 CREATE INDEX idx_mt_message_id ON message_traces(message_id);
 
--- ============================================================================
--- 17. trace_retrieval_chunks — 检索结果明细表
--- ============================================================================
-CREATE TABLE trace_retrieval_chunks (
-    id              SERIAL PRIMARY KEY,
-    trace_id        INTEGER NOT NULL REFERENCES message_traces(id),
-    document_id     INTEGER NOT NULL REFERENCES knowledge_documents(id) DEFERRABLE,
-    chunk_id        INTEGER NOT NULL REFERENCES knowledge_chunks(id) DEFERRABLE,
-    score           DECIMAL(6,4) NOT NULL,
-    rank_position   INTEGER NOT NULL
-);
-
-CREATE INDEX idx_trc_trace_id ON trace_retrieval_chunks(trace_id);
-
--- ============================================================================
--- 18. trace_function_calls — 工具调用明细表
+-- 17. trace_function_calls — 工具调用明细表
 -- ============================================================================
 CREATE TABLE trace_function_calls (
     id              SERIAL PRIMARY KEY,
@@ -386,7 +373,7 @@ CREATE TABLE trace_function_calls (
 CREATE INDEX idx_tfc_trace_id ON trace_function_calls(trace_id);
 
 -- ============================================================================
--- 19. knowledge_documents — 知识文档表
+-- 18. knowledge_documents — 知识文档表
 -- ============================================================================
 CREATE TABLE knowledge_documents (
     id                SERIAL PRIMARY KEY,
@@ -409,7 +396,7 @@ CREATE INDEX idx_kd_status    ON knowledge_documents(status);
 CREATE INDEX idx_kd_active    ON knowledge_documents(deleted_at) WHERE deleted_at IS NULL;
 
 -- ============================================================================
--- 20. knowledge_chunks — 知识切片表
+-- 19. knowledge_chunks — 知识切片表
 -- ============================================================================
 CREATE TABLE knowledge_chunks (
     id                SERIAL PRIMARY KEY,
@@ -424,7 +411,7 @@ CREATE TABLE knowledge_chunks (
 CREATE INDEX idx_kc_document_id ON knowledge_chunks(document_id);
 
 -- ============================================================================
--- 21. chunk_metadata — 切片元信息表
+-- 20. chunk_metadata — 切片元信息表
 -- ============================================================================
 CREATE TABLE chunk_metadata (
     id          SERIAL PRIMARY KEY,
@@ -438,7 +425,7 @@ CREATE TABLE chunk_metadata (
 CREATE INDEX idx_cm_chunk_id ON chunk_metadata(chunk_id);
 
 -- ============================================================================
--- 22. chunk_tags — 切片标签表
+-- 21. chunk_tags — 切片标签表
 -- ============================================================================
 CREATE TABLE chunk_tags (
     id          SERIAL PRIMARY KEY,
@@ -450,29 +437,7 @@ CREATE TABLE chunk_tags (
 
 CREATE INDEX idx_ct_chunk_id ON chunk_tags(chunk_id);
 
--- ============================================================================
--- 23. document_processing_jobs — 文档处理任务表
--- ============================================================================
-CREATE TABLE document_processing_jobs (
-    id                SERIAL PRIMARY KEY,
-    document_id       INTEGER NOT NULL REFERENCES knowledge_documents(id),
-    job_type          VARCHAR(32) NOT NULL,
-    status            VARCHAR(16) DEFAULT 'pending',
-    progress_pct      INTEGER DEFAULT 0,
-    total_chunks      INTEGER,
-    completed_chunks  INTEGER DEFAULT 0,
-    error_message     TEXT,
-    started_at        TIMESTAMP,
-    completed_at      TIMESTAMP,
-    created_at        TIMESTAMP DEFAULT NOW(),
-    updated_at        TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX idx_dpj_document_id ON document_processing_jobs(document_id);
-CREATE INDEX idx_dpj_status      ON document_processing_jobs(status);
-
--- ============================================================================
--- 24. feedbacks — 反馈表
+-- 22. feedbacks — 反馈表
 -- ============================================================================
 CREATE TABLE feedbacks (
     id              SERIAL PRIMARY KEY,
@@ -490,7 +455,7 @@ CREATE INDEX idx_fb_message_id ON feedbacks(message_id);
 CREATE INDEX idx_fb_active      ON feedbacks(deleted_at) WHERE deleted_at IS NULL;
 
 -- ============================================================================
--- 25. human_handoffs — 转人工记录表
+-- 23. human_handoffs — 转人工记录表
 -- ============================================================================
 CREATE TABLE human_handoffs (
     id                SERIAL PRIMARY KEY,
@@ -510,7 +475,7 @@ CREATE INDEX idx_hh_status ON human_handoffs(status);
 CREATE INDEX idx_hh_active ON human_handoffs(deleted_at) WHERE deleted_at IS NULL;
 
 -- ============================================================================
--- 26. handoff_slots — 转交槽位信息表
+-- 24. handoff_slots — 转交槽位信息表
 -- ============================================================================
 CREATE TABLE handoff_slots (
     id              SERIAL PRIMARY KEY,
@@ -524,7 +489,7 @@ CREATE TABLE handoff_slots (
 CREATE INDEX idx_hs_handoff_id ON handoff_slots(handoff_id);
 
 -- ============================================================================
--- 27. handoff_agent_attempts — 转交 Agent 尝试记录表
+-- 25. handoff_agent_attempts — 转交 Agent 尝试记录表
 -- ============================================================================
 CREATE TABLE handoff_agent_attempts (
     id              SERIAL PRIMARY KEY,
@@ -540,7 +505,7 @@ CREATE TABLE handoff_agent_attempts (
 CREATE INDEX idx_haa_handoff_id ON handoff_agent_attempts(handoff_id);
 
 -- ============================================================================
--- 28. evaluation_runs — 评估运行表
+-- 26. evaluation_runs — 评估运行表
 -- ============================================================================
 CREATE TABLE evaluation_runs (
     id                      SERIAL PRIMARY KEY,
@@ -569,7 +534,7 @@ CREATE INDEX idx_er_agent_id ON evaluation_runs(agent_id);
 CREATE INDEX idx_er_status   ON evaluation_runs(status);
 
 -- ============================================================================
--- 29. evaluation_results — 评估结果明细表
+-- 27. evaluation_results — 评估结果明细表
 -- ============================================================================
 CREATE TABLE evaluation_results (
     id                  SERIAL PRIMARY KEY,
@@ -600,7 +565,7 @@ CREATE TABLE evaluation_results (
 CREATE INDEX idx_eres_run_id ON evaluation_results(run_id);
 
 -- ============================================================================
--- 30. audit_log — 审计日志表
+-- 28. audit_log — 审计日志表
 -- ============================================================================
 CREATE TABLE audit_log (
     id              BIGSERIAL PRIMARY KEY,
@@ -621,7 +586,7 @@ CREATE INDEX idx_al_created_at  ON audit_log(created_at);
 -- ============================================================================
 -- 视图
 -- ============================================================================
--- 31. knowledge_document_stats — 知识文档统计视图
+-- 29. knowledge_document_stats — 知识文档统计视图
 -- ============================================================================
 CREATE VIEW knowledge_document_stats AS
 SELECT
@@ -635,7 +600,7 @@ WHERE d.deleted_at IS NULL
 GROUP BY d.id, d.title;
 
 -- ============================================================================
--- 32. conversation_satisfaction — 会话满意度视图
+-- 30. conversation_satisfaction — 会话满意度视图
 -- ============================================================================
 CREATE VIEW conversation_satisfaction AS
 SELECT
@@ -707,3 +672,22 @@ CREATE INDEX idx_refunds_user_id  ON refunds(user_id);
 -- 同一订单同时只允许一张未终态退款单：审批恢复后的重复提交由这条约束吸收
 CREATE UNIQUE INDEX uq_refunds_open_per_order ON refunds(order_id)
     WHERE status NOT IN ('refunded', 'rejected', 'cancelled');
+
+-- Agent 高危操作的审批队列：LangGraph 检查点的"可查询投影"
+-- 节点在 interrupt() 前写入，审批接口写结论；resume 会重跑节点，所以写入必须幂等
+CREATE TABLE approval_requests (
+    id              SERIAL PRIMARY KEY,
+    agent_name      VARCHAR(32) NOT NULL,
+    conversation_id INTEGER NOT NULL,
+    user_id         VARCHAR(128),
+    actions         TEXT NOT NULL,                            -- JSON：[{"tool": "...", "label": "...", "arguments": {...}}]
+    status          VARCHAR(16) NOT NULL DEFAULT 'pending',   -- pending|approved|rejected|expired
+    requested_at    TIMESTAMP DEFAULT NOW(),
+    decided_at      TIMESTAMP,
+    decided_by      VARCHAR(64),
+    decision_note   VARCHAR(512),
+    CONSTRAINT uq_approval_thread UNIQUE (agent_name, conversation_id)
+);
+
+CREATE INDEX ix_approval_requests_conversation_id ON approval_requests(conversation_id);
+CREATE INDEX ix_approval_requests_status         ON approval_requests(status);
