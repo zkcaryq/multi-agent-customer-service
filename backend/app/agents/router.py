@@ -1,8 +1,16 @@
-"""Intent classification and routing to domain agents.
+"""意图分类与领域路由。
 
-Two-tier strategy:
-  1. LLM classifier（模型由 LLM_MODEL_INTENT 配置）— primary, high accuracy
-  2. Keyword match — fallback on LLM error or timeout
+两层策略（先准后稳）：
+  1. LLM 分类（岗位 `intent`，模型由配置决定，temperature=0）—— 主路径，能理解改写和上下文
+  2. 关键词规则 —— 兜底：模型超时/限流/返回非法 JSON 时仍能分诊
+
+外加一条**确定性路由守卫**（`_guard_routing`）：模型偶尔把"我要退款，商品和描述不符"
+判成投诉域，一旦判错，下游会去建投诉工单而不是走退款流程。这类错误不能靠调提示词碰运气，
+用规则硬纠。
+
+【为什么分类不放在 Agent 图里】
+分类是所有领域共用的前置步骤，放进任一领域的图都会导致其余三个域重复实现；
+而且它决定"进哪张图"，天然属于图之前的一层。
 """
 
 from __future__ import annotations
@@ -12,11 +20,16 @@ from dataclasses import dataclass
 
 # ── Intent result ────────────────────────────────────────────────────────────
 
+# 合法目标集中在一处：新增领域时这里改一行，下面的校验和兜底都跟着生效
 VALID_TARGETS = ("pre_sales", "during_sales", "after_sales", "complaint")
 
 
 @dataclass
 class IntentResult:
+    """一次分诊的结论。
+
+    classifier 字段很关键：排查"为什么答得不对"时，先看这次是模型判的还是关键词判的。
+    """
     intent_name: str
     target_agent: str  # one of VALID_TARGETS
     confidence: float
@@ -25,6 +38,9 @@ class IntentResult:
 
 # ── LLM classification prompt ────────────────────────────────────────────────
 
+# 提示词的三段结构：角色与候选 → 判定原则 → 输出格式。
+# "拿不准时归 after_sales" 是刻意写的：售后能兜住退换/物流/退款，
+# 误判到售前会导致用户问退款却被推销商品。
 _INTENT_SYSTEM_PROMPT = """你是电商客服意图分类器。根据用户消息，判断应该由哪个 Agent 处理。
 
 Agent 列表及其职责：
@@ -43,6 +59,9 @@ Agent 列表及其职责：
 {"intent_name": "query_product", "target_agent": "pre_sales", "confidence": 0.95}
 """
 
+# Few-shot 不是随便挑的：每个域 3-6 条，覆盖"典型说法 + 容易混淆的边界"。
+# 例如"收到的东西是坏的"放在售后，而"东西是假货，我要求赔偿"放在投诉——
+# 二者的差别是"有没有索赔/维权诉求"，模型靠这几组对照学会边界。
 _FEW_SHOT_EXAMPLES = [
     # 售前
     ("iPhone 15 Pro 多少钱？", '{"intent_name": "query_product", "target_agent": "pre_sales", "confidence": 0.98}'),
@@ -73,34 +92,38 @@ _FEW_SHOT_EXAMPLES = [
 async def _classify_llm(user_query: str) -> IntentResult | None:
     """用配置指定的轻量模型分类。失败返回 None，由关键词规则兜底。"""
     try:
-        from app.providers import get_chat
+        from app.providers import get_chat   # 延迟导入：避免 agents 与 providers 循环依赖
 
         messages: list[dict] = [
             {"role": "system", "content": _INTENT_SYSTEM_PROMPT},
         ]
+        # few-shot 用标准的 user/assistant 对话形式喂进去，比塞在 system 里更稳
         for user_msg, assistant_msg in _FEW_SHOT_EXAMPLES:
             messages.append({"role": "user", "content": user_msg})
             messages.append({"role": "assistant", "content": assistant_msg})
         messages.append({"role": "user", "content": user_query})
 
         result = await get_chat().chat(
-            role="intent",
+            role="intent",        # 岗位 → 小模型（分类不需要大模型，省钱又低延迟）
             messages=messages,
-            temperature=0.0,
-            max_tokens=128,
-            json_mode=True,
+            temperature=0.0,      # 分类必须可复现；0.7 会让同一句话有时售前有时售后
+            max_tokens=128,       # 只要一小段 JSON
+            json_mode=True,       # 让供应商保证返回合法 JSON（有的模型支持 response_format）
         )
         data = json.loads(result.content)
     except Exception:
+        # 超时、限流、返回非 JSON、模型未配置……全部走兜底。
+        # 这里不记日志是原实现的取舍；排查时可在此加 log.warning。
         return None
 
     target = data.get("target_agent", "pre_sales")
     if target not in VALID_TARGETS:
+        # 模型幻觉出不存在的 Agent 名：宁可回落到售前，也不要让下游 KeyError
         target = "pre_sales"
 
     return IntentResult(
         intent_name=data.get("intent_name", "query_product"),
-        target_agent=_guard_routing(user_query, target),
+        target_agent=_guard_routing(user_query, target),   # ← 确定性纠偏，见下
         confidence=float(data.get("confidence", 0.7)),
         classifier="llm",
     )
@@ -113,6 +136,12 @@ _COMPLAINT_WORDS = ("投诉", "赔偿", "维权", "道歉", "举报", "起诉", 
 
 
 def _guard_routing(user_query: str, target: str) -> str:
+    """只纠正"投诉 → 售后"这一种误判，其余目标原样返回。
+
+    为什么只用规则改这一种？
+    别的方向（售前↔售中、售前↔售后）误判的代价是"答非所问"，用户重问一句即可；
+    而"退款被判成投诉"会真的走错业务流程（建单而非退款），代价高，必须兜住。
+    """
     if target != "complaint":
         return target
     wants_refund = any(k in user_query for k in _AFTER_SALES_ACTIONS)
@@ -122,6 +151,8 @@ def _guard_routing(user_query: str, target: str) -> str:
 
 # ── Keyword fallback (kept from original implementation) ──────────────────────
 
+# 关键词表：每条是（词表, 意图名, Agent 名）。
+# 打分方式见 _classify_keyword：命中数 / 词表长度，偏向"短词表且全中"的类别。
 _INTENT_RULES: list[tuple[list[str], str, str]] = [
     (
         ["投诉", "维权", "赔偿", "道歉", "315", "12315", "工商", "市场监管", "消协",
@@ -161,12 +192,15 @@ def _classify_keyword(user_query: str) -> IntentResult:
     best_agent = "pre_sales"
 
     for keywords, intent_name, agent in _INTENT_RULES:
+        # 归一化打分：命中数 / 词表长度。这样长词表不会因为"词多"而天然占优
         score = sum(1 for kw in keywords if kw in user_query) / len(keywords)
         if score > best_score:
             best_score = score
             best_intent = intent_name
             best_agent = agent
 
+    # 放大 3 倍再截断到 0.98：命中 1 个词通常已足够可信，但绝不报 1.0。
+    # 一个词都没命中时给 0.5（相当于"我不确定"），但仍然要返回一个可用的默认路由。
     confidence = min(best_score * 3, 0.98) if best_score > 0 else 0.5
     return IntentResult(
         intent_name=best_intent,
@@ -188,7 +222,11 @@ async def classify_intent(user_query: str) -> IntentResult:
 
 
 def agent_by_name(name: str):
-    """按 Agent 名取实例。审批回调只带名字，需要据此找回同一条 LangGraph 线程。"""
+    """按 Agent 名取实例。审批回调只带名字，需要据此找回同一条 LangGraph 线程。
+
+    函数内 import 而不是模块顶部 import：四个 agent 模块都会 import base_agent，
+    顶部导入会形成 agents 包内的循环依赖。
+    """
     if name == "complaint":
         from app.agents.complaint.agent import complaint_agent
 
@@ -216,19 +254,22 @@ def collaboration_candidates(user_query: str, primary_agent: str, limit: int = 2
 
     LLM 负责主路由；这里使用确定性关键词补充协作 Agent，避免为了找辅助 Agent
     再增加一次不稳定的模型分类。辅助 Agent 只提供建议，不执行有副作用的工具。
+
+    例："订单到哪了？另外能开发票吗" → ["after_sales", "during_sales"]
     """
     scored: list[tuple[int, str]] = []
     seen: set[str] = set()
     for keywords, _intent_name, agent_name in _INTENT_RULES:
         if agent_name in seen:
             continue
+        # 这里用"命中个数"而不是归一化比例：多领域比较时，命中词更多的领域更相关
         score = sum(1 for keyword in keywords if keyword in user_query)
         if score:
             scored.append((score, agent_name))
             seen.add(agent_name)
 
     scored.sort(key=lambda item: item[0], reverse=True)
-    agents = [primary_agent]
+    agents = [primary_agent]          # 主 Agent 恒第一，后面的才是辅助
     for _score, agent_name in scored:
         if agent_name not in agents:
             agents.append(agent_name)

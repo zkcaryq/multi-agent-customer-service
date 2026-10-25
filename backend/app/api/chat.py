@@ -1,4 +1,21 @@
-"""Chat REST API endpoint — with PostgreSQL persistence."""
+"""用户侧聊天接口：/chat、/chat/confirm、/feedback，以及它们背后的落库逻辑。
+
+【这一层的职责】
+只做 HTTP 契约与"会话生命周期"，不碰业务判断：
+1. 脱敏 + 内容安全（命中即拦截，不进入 Agent）；
+2. 调 coordinator 分诊（第 07 章）并**在跑图之前确定会话主键**；
+3. 跑图 / 恢复审批（第 06、09 章）；
+4. 把结果落库（messages + message_traces）并组装响应。
+
+【为什么会话主键必须在这里定】
+同一个 ID 同时是：数据库外键、Redis 记忆 key、LangGraph thread_id、审批表会话号。
+先跑图再建会话，会导致第一轮的状态落在临时 ID 上，第二轮换 ID 上下文就断了。
+
+【错误边界】
+- 会话存储不可用 → 503（不能拿客户端临时 ID 继续跑，否则审批会出现孤儿状态）
+- 模型/供应商不可用 → 503（细节进日志，给用户一句话）
+- 其它异常 → 500（同样不泄漏内部异常文本）
+"""
 
 import json
 
@@ -56,7 +73,13 @@ async def _get_or_create_user(user_id: str) -> int:
 async def _get_or_create_conversation(
     user_db_id: int, intent_agent: str, requested_id: int = 0,
 ) -> int:
-    """复用当前用户已有会话；不存在时创建，保证记忆、消息和 checkpoint 同 ID。"""
+    """复用当前用户已有会话；不存在时创建，保证记忆、消息和 checkpoint 同 ID。
+
+    `requested_id` 来自客户端（0 表示"新会话"）。这里做两件事：
+    ① 范围校验（>0 且 <= INT32 上限）—— 前端曾用 Date.now() 的 13 位毫秒时间戳
+       当会话号，进审批表时整型溢出；校验放在入口，错误立即可见；
+    ② 归属校验 —— 只有属于当前用户的会话才复用，防止拿到别人的会话号续聊。
+    """
     async with async_session_factory() as session:
         from sqlalchemy import select
 
@@ -114,7 +137,12 @@ async def _save_message(conversation_id: int, role: str, content: str) -> int:
 
 
 async def _save_trace(message_id: int, state: dict) -> None:
-    """Persist trace data to message_traces."""
+    """把 state["trace"] 摊平存进 message_traces + trace_function_calls。
+
+    为什么在这里做映射而不是让 Agent 直接写库：
+    Agent 只负责"产生 trace"，落库格式（列名、拆分表）属于接口层职责；
+    这样离线脚本/评测调用 Agent 时不产生数据库副作用，也能拿到同一份 trace。
+    """
     trace = state.get("trace", {})
     if not trace:
         return
@@ -171,6 +199,11 @@ async def _persist_exchange(
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest) -> ChatResponse:
+    """一轮对话：脱敏 → 安全 → 分诊 → 建/复用会话 → 跑图 → 落库 → 组装响应。
+
+    中途在高危工具处会返回 pending_confirmation（图停在审批节点），
+    此时 reply 是确认提示语，客户端需要调 /chat/confirm 继续。
+    """
     # Step 1: Mask sensitive info + content safety check
     clean_msg = mask_sensitive(req.message)
     safety = content_safety.check(clean_msg)
