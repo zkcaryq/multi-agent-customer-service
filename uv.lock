@@ -347,7 +347,7 @@ wheels = [
 ]
 
 [[package]]
-name = "cogniflow"
+name = "multi-agent-customer-service"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

@@ -247,7 +247,7 @@ class RedisMemoryStore:
     """Redis-backed memory store — persistent, suitable for multi-process / production."""
 
     # 键前缀带项目名：同一台 Redis 可能被多个项目共用（本项目就是分库/分前缀隔离）
-    _KEY_PREFIX = "cogniflow:memory:"
+    _KEY_PREFIX = "ma-cs:memory:"
     _TTL = 86400  # 24 hours
 
     def __init__(self, redis_url: str | None = None) -> None:

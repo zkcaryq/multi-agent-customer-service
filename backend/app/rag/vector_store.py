@@ -81,7 +81,7 @@ class VectorStore:
                     name="embedding", dtype=DataType.FLOAT_VECTOR, dim=settings.embedding_dim
                 ),
             ],
-            description="CogniFlow knowledge base chunks",
+            description="customer-service knowledge chunks",
         )
 
         index_params = self.client.prepare_index_params()

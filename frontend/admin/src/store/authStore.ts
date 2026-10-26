@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import type { AdminUser } from '../types';
 
-const TOKEN_KEY = 'cogniflow-admin-token';
+const TOKEN_KEY = 'ma-cs-admin-token';
 const API_BASE = 'http://localhost:8000/api/v1';
 
 interface AuthState {

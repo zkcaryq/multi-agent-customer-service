@@ -1,4 +1,4 @@
-"""CogniFlow ORM models — matches schema.sql MVP core tables."""
+"""ORM models — matches schema.sql MVP core tables."""
 
 from __future__ import annotations
 

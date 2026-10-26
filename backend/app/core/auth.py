@@ -33,7 +33,7 @@ DECIDER_ROLES = (ROLE_ADMIN, ROLE_SUPERVISOR)
 _ALGO = "pbkdf2_sha256"
 _ITERATIONS = 240_000
 _DEV_SECRET_WARNED = False
-_DEV_SECRET = "cogniflow-dev-insecure-secret-change-me"
+_DEV_SECRET = "ma-cs-dev-insecure-secret-change-me"
 
 
 class AuthError(Exception):

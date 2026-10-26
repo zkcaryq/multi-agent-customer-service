@@ -30,12 +30,12 @@ def setup_logging() -> None:
 
     # uvicorn --reload 等场景会重复导入，避免叠加 handler 导致每行打印两次
     for handler in list(root.handlers):
-        if getattr(handler, "_cogniflow", False):
+        if getattr(handler, "_app_handler", False):
             root.removeHandler(handler)
     if not root.handlers:
         handler = logging.StreamHandler(sys.stdout)
         handler.setFormatter(_TraceFormatter(fmt=settings.log_format, datefmt="%H:%M:%S"))
-        handler._cogniflow = True
+        handler._app_handler = True
         root.addHandler(handler)
 
     # 三方库的 INFO 太吵，只保留它们自己的告警

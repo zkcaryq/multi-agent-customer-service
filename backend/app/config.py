@@ -58,7 +58,7 @@ LLM_ROLES = (
 class Settings:
     # ── 基础设施 ────────────────────────────────────────────────────────────
     database_url: str = _env(
-        "DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:5432/cogniflow"
+        "DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:5432/customer_service"
     )
     redis_url: str = _env("REDIS_URL", "redis://localhost:6379/0")
 
@@ -127,7 +127,7 @@ class Settings:
     # 使用项目专用变量名，避免 CI / IDE 常见的 LOG_FORMAT=json 污染
     # logging.Formatter 并导致应用在导入阶段崩溃。
     log_format: str = _env(
-        "COGNIFLOW_LOG_FORMAT",
+        "APP_LOG_FORMAT",
         "%(asctime)s %(levelname)-7s %(name)s [%(trace)s] %(message)s",
     )
 

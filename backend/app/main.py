@@ -23,7 +23,7 @@ from app.api.auth import router as auth_router
 from app.core.log import get_logger, set_trace, setup_logging, trace_id
 
 setup_logging()
-log = get_logger("cogniflow.startup")
+log = get_logger("app.startup")
 
 
 @asynccontextmanager

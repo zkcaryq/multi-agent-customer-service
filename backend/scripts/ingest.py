@@ -25,7 +25,7 @@ from app.rag.ingestion import BM25_INDEX_PATH
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="CogniFlow RAG ingestion")
+    parser = argparse.ArgumentParser(description="customer-service RAG ingestion")
     parser.add_argument("--rebuild", action="store_true", help="Drop and re-ingest all documents")
     parser.add_argument("--check", action="store_true", help="Only check if ingestion is needed")
     parser.add_argument("--sync-db", action="store_true", help="Sync existing data files to PostgreSQL only")

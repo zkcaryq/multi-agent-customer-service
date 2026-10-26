@@ -1,7 +1,7 @@
 """基于 LangChain 的 ChatModel 适配器。
 
 LangChain 负责模型消息、结构化输出和 Tool Calling 协议适配；业务层仍只依赖
-``ChatProvider``，工具校验、审批、重试和审计继续由 CogniFlow 自己控制。
+``ChatProvider``，工具校验、审批、重试和审计继续由本项目自己控制。
 """
 
 from __future__ import annotations

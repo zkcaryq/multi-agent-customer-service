@@ -40,7 +40,7 @@ async def get_checkpointer() -> Any:
             open=False,
             min_size=1,
             max_size=5,
-            name="cogniflow-checkpoints",
+            name="ma-cs-checkpoints",
             # 与 SQLAlchemy 侧保持一致：锁 UTC。注意 psycopg 不认 asyncpg 的
             # server_settings，设置会话参数要用 libpq 的 options。
             kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row,

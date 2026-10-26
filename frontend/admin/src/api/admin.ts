@@ -126,7 +126,7 @@ export interface ToolRow {
 }
 
 function authHeaders(extra?: HeadersInit): Record<string, string> {
-  const token = localStorage.getItem('cogniflow-admin-token');
+  const token = localStorage.getItem('ma-cs-admin-token');
   return { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(extra as object) };
 }
 
@@ -134,7 +134,7 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(url, { ...options, headers: authHeaders(options?.headers) });
   if (res.status === 401) {
     // 令牌过期/被撤销：回登录页，避免页面停在假数据上
-    localStorage.removeItem('cogniflow-admin-token');
+    localStorage.removeItem('ma-cs-admin-token');
     if (!location.pathname.endsWith('/login')) location.href = '/login';
     throw new Error('登录已过期');
   }

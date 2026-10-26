@@ -8,12 +8,12 @@ export default defineConfig({
       entry: 'src/main.tsx',
       name: 'MultiAgentCustomerServiceWidget',
       formats: ['iife'],
-      fileName: () => 'cogniflow-widget.js',
+      fileName: () => 'ma-cs-widget.js',
     },
     cssCodeSplit: false,
     rollupOptions: {
       output: {
-        assetFileNames: 'cogniflow-widget.[ext]',
+        assetFileNames: 'ma-cs-widget.[ext]',
       },
     },
   },
