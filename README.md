@@ -126,8 +126,8 @@ frontend/
 接口自检与回归：
 
 ```bash
-uv run pytest -m "not integration"   # 66 项单元测试（不需要外部服务，约 2 秒）
-uv run pytest                        # 75 项：66 单元 + 9 个端到端自检（需要 PG/Redis，约 5 分钟）
+uv run pytest -m "not integration"   # 67 项单元测试（不需要外部服务，约 2 秒）
+uv run pytest                        # 76 项：67 单元 + 9 个端到端自检（需要 PG/Redis，约 5 分钟）
 ```
 
 离线评测（都要真实模型；`run_evaluation` 会把结果写进 `evaluation_runs/evaluation_results`，复杂任务评测只打印）：
