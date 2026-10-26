@@ -255,7 +255,9 @@ def test_function_schema_hides_context_params_from_the_model():
     assert schema["required"] == ["order_id"]
 
 
-# ── provider 装配 ────────────────────────────────────────────────────────────def test_chat_override_ignores_configured_provider():
+# ── provider 装配 ────────────────────────────────────────────────────────────
+
+def test_chat_override_ignores_configured_provider():
     """自检注入桩必须与 CHAT_PROVIDER 的取值无关。
 
     曾经脚本往 _cache["chat:openai_compat"] 里塞桩，配置一换成 langchain_openai
