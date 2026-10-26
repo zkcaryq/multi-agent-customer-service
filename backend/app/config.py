@@ -1,3 +1,5 @@
+"""配置中心：所有环境变量收敛在这里，业务代码只读 settings。"""
+
 from __future__ import annotations
 
 import os

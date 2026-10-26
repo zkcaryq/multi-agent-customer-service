@@ -1,3 +1,5 @@
+"""内容安全与敏感信息脱敏：手机号/身份证/银行卡打码，违规内容拦截。"""
+
 from __future__ import annotations
 
 import re

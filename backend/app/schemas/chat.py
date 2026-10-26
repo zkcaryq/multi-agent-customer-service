@@ -1,3 +1,5 @@
+"""对话接口的请求/响应模型（含会话号取值范围校验）。"""
+
 from __future__ import annotations
 
 from pydantic import BaseModel, Field

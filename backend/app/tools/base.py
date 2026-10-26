@@ -1,3 +1,5 @@
+"""工具元数据结构：ToolDefinition / ToolParameterDef / ToolResult。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
