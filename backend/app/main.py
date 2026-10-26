@@ -1,3 +1,5 @@
+"""FastAPI 应用组装：启动钩子（建表/索引/工具）、中间件、路由挂载、健康检查。"""
+
 import os
 import sys
 from contextlib import asynccontextmanager
@@ -80,11 +82,25 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="CogniFlow — 智能客服",
+    title="基于 Multi-Agent 的智能客服业务平台",
     description="电商智能客服系统 — 售前/售中/售后/投诉四领域 Agent 服务",
     version="0.2.0",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def trace_middleware(request: Request, call_next):
+    """每个请求一个 trace_id，之后同一请求的日志能串成一条链。
+
+    客户端可通过 X-Trace-Id 透传；没传就生成 8 位随机串，并回写到响应头。
+    chat 接口在确定会话号后会把它切成 conv-<id>，便于按会话检索。
+    """
+    set_trace(request.headers.get("X-Trace-Id"))
+    response = await call_next(request)
+    response.headers["X-Trace-Id"] = trace_id()
+    return response
+
 
 app.add_middleware(
     CORSMiddleware,
