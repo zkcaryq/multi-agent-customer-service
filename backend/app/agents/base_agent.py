@@ -23,21 +23,24 @@
       pending_confirmation / trace 四样东西组装 HTTP 响应。
 
 【为什么状态是 TypedDict 而不是 dataclass / Pydantic】
-LangGraph 的 checkpointer 会把 state 序列化成 JSON 存进 PostgreSQL。
-TypedDict 本身就是 dict 的子类语义，序列化零成本、字段可增可减；
-Pydantic 模型需要额外的 dump 逻辑，且版本升级时反序列化容易炸。
-代价是没有运行时校验 —— 靠 `AgentState` 的类型标注 + 单测兜底。
+TypedDict 给普通字典提供静态字段约定，不负责运行时校验或填默认值。
+LangGraph 支持多种状态 schema；本项目选择 TypedDict 是因为节点本来就读写 dict。
+检查点使用框架的 serializer（默认可使用 msgpack 等编码），不能笼统称为 JSON 存储。
+把数据库对象转成普通字段能降低耦合；可序列化类型仍取决于所用 serializer。
 
 【为什么图里要拆 6 个节点而不是一个大函数】
 1. 每个节点是一个「可恢复的断点」：进程崩了，checkpointer 记的是节点边界；
-2. 审批必须停在独立节点 await_approval，interrupt() 才能干净地挂起/恢复；
+2. 本项目把审批独立成 await_approval，便于控制重放前后的副作用；框架并不强制独立节点；
 3. trace 的耗时统计天然按节点切分，监控页能直接看到检索/决策/生成各花多久。
 """
 
+# 让全部类型标注用 PEP 585/604 新语法（list[dict[str, Any]] | None）且运行时不求值，
+# AgentState 的字段因此可以引用尚未定义的名字
 from __future__ import annotations
 
 import json          # 工具结果拼进提示词、工具签名去重都要 JSON
 import time          # 每个节点自己掐表，写进 trace
+# TypedDict 只给静态字段约定：不校验、不填默认值，漏字段要到第一个节点下标取值时才炸
 from typing import Any, TypedDict
 
 from langgraph.graph import END, StateGraph   # 状态图：节点 + 边 + 终止标记
@@ -66,17 +69,19 @@ from app.tools.registry import tool_registry   # 全局工具注册表（按 age
 class AgentState(TypedDict):
     """一张会话在状态机里流动时携带的全部数据。
 
-    注意：LangGraph 的每个节点都返回「整个 state」，而不是局部变量。
-    这样任何一步都能从检查点恢复，代价是 state 要尽量小（别塞大对象）。
+    注意：本项目习惯返回整个 state；LangGraph 也支持只返回发生变化的字段。
+    框架按状态 channel/reducer 合并更新后存检查点，恢复并不要求返回整个字典。
     这里的字段分四组：身份、检索、工具、结果/轨迹。
     """
 
     # ── 身份与输入 ──────────────────────────────────────────────────────
+    # 会话主键：既参与 thread_id，也是审批表和审计日志的 entity_id，所以必须是 int（对齐外键）
     conversation_id: int
     user_id: str          # 外部用户号（如 user_001），工具层用它做归属校验
     user_query: str       # 本轮用户原话（已脱敏；不会带历史，历史在 memory 里）
     intent: str           # 路由得到的意图名，仅用于日志/追踪
     safety_passed: bool   # 内容安全检测结果（拦截时不会进入本图）
+    # 拦截话术：本类既不读也不写，run() 填了空串后一路原样带着，留给调用方组装响应
     safety_message: str
 
     # ── 检索 ────────────────────────────────────────────────────────────
@@ -90,12 +95,15 @@ class AgentState(TypedDict):
 
     # ── 协作与输出 ──────────────────────────────────────────────────────
     collaboration_context: list[dict[str, Any]]  # 辅助 Agent 的只读建议
+    # 空串有两种含义：正常生成前停在审批（generate 没跑），或模型返回空文本；调用方靠 __interrupt__ 区分
     final_response: str
     handoff: bool                         # 是否需要转人工
     handoff_reason: str                   # user_request / complaint_domain / tool_failure_all / knowledge_gap / approval_rejected
     trace: dict[str, Any]                 # 各节点耗时、token、工具结果，最终落到 message_traces
 
     # ── Human-in-the-loop ───────────────────────────────────────────────
+    # 给前端的确认单（暂停时非空）；注意中断那次运行里它仍是 None —— 节点在 interrupt() 处抛出，
+    # 本次赋值不会合并进 state，确认单只能从返回值的 __interrupt__[0].value 取
     pending_confirmation: dict[str, Any] | None  # 给前端的确认单（暂停时非空）
     approval: dict[str, Any] | None              # 人工结论 {approved, note, tools}
 
@@ -113,6 +121,8 @@ class DomainAgent:
         # 注册本域工具到全局表（幂等：同一进程里重复构造 Agent 不会重复注册）
         self.register_tools()
         # 检索器按配置注入权重，换配置不需要改代码
+        # 构造只存参数不建连接；第 4 个参数 similarity_threshold 故意没传，
+        # 于是走配置默认值（SIMILARITY_THRESHOLD），这里看不到它就等于少一处可调
         self.retriever = HybridRetriever(
             bm25_weight=settings.bm25_weight,
             vector_weight=settings.vector_weight,
@@ -157,6 +167,7 @@ class DomainAgent:
             call_tools ─→ decide_tools（还有轮次额度，让模型看结果继续规划）
                        └→ generate    （到上限，强制收口）
         """
+        # 把 TypedDict 类交给 StateGraph：每个键成为一个 channel，节点返回值按键合并
         workflow = StateGraph(AgentState)
 
         # 节点名即日志里的步骤名，监控页按这些名字展示耗时
@@ -167,6 +178,7 @@ class DomainAgent:
         workflow.add_node("call_tools", self._call_tools)      # 执行工具
         workflow.add_node("generate", self._generate)          # 组织最终回答
 
+        # 入口固定 retrieve：意图/领域路由在 coordinator 做完才进图，图内不再做意图分流
         workflow.set_entry_point("retrieve")
         workflow.add_edge("retrieve", "rerank")  # 检索必然接重排（重排内部自行处理空结果）
         # 用户点名要人工时直接生成并转接，不再规划工具——
@@ -195,6 +207,7 @@ class DomainAgent:
             self._continue_after_tools,
             {"decide": "decide_tools", "generate": "generate"},
         )
+        # 全图唯一的无条件终点边：四条条件边都把 generate 当出口，所以任何收口路径都会经过消息拼装与记忆落盘
         workflow.add_edge("generate", END)
 
         return workflow
@@ -208,6 +221,9 @@ class DomainAgent:
         PostgreSQL。重启后 resume 才能从同一个节点接着跑。
         """
         if self._compiled is None:
+            # await get_checkpointer() 是让出点：同 Agent 的首次并发请求可能都看到 None、各编译一次，
+            # 后写覆盖前写（结果等价，只是白付一次编译）
+            # 缓存一次成型：若 PG 初始化失败降级成内存 saver，之后也不会重试 PG，只能重启进程
             self._compiled = self._builder.compile(checkpointer=await get_checkpointer())
         return self._compiled
 
@@ -226,15 +242,19 @@ class DomainAgent:
         try:
             results = await self.retriever.retrieve(state["user_query"])
             # 只把下游需要的字段塞进 state，不要把整个 RetrievalResult 对象放进去
-            # （checkpointer 要 JSON 序列化，自定义类会失败）
+            # （避免把 ORM 会话、连接等不可移植对象带入检查点；具体编码由 serializer 决定）
             state["retrieved_docs"] = [
                 {"id": r.chunk_id, "content": r.content, "score": r.score, "source": r.source_document}
                 for r in results
             ]
+            # 口径是"两路融合并截到 top_k 之后的候选数"（默认 5），不是最终进提示词的条数（那里硬截 [:3]）
             state["trace"]["retrieval_count"] = len(results)
         except Exception as exc:  # noqa: BLE001 —— 检索失败必须降级，不能打断整条会话
+            # 显式置空而不是留着上轮残值：_rerank 靠"空候选"跳过，_detect_handoff 靠"无知识"判知识盲区
             state["retrieved_docs"] = []
+            # 只存 str(exc)：异常对象带连接/游标，既进不了检查点也不能直接给前端
             state["trace"]["retrieval_error"] = str(exc)
+        # 计时写在 except 之外：降级路径也要留耗时，监控页才能区分"检索慢"和"检索挂了"
         state["trace"]["retrieval_ms"] = int((time.monotonic() - t0) * 1000)
         return state
 
@@ -243,9 +263,10 @@ class DomainAgent:
 
         两层降级：
         1) 没有候选 → 直接跳过，耗时记 0；
-        2) 重排服务不可用 → reranker 内部退回融合分数排序，错误记进 trace。
+        2) ProviderError → reranker 内部记录 warning 并降级；只有继续向外抛的错误才记进 trace。
         """
         t0 = time.monotonic()
+        # 空候选直接收口：省一次必定空转的供应商调用；写 0 而不是留空键，前端不必做存在性判断
         if not state["retrieved_docs"]:
             state["trace"]["rerank_ms"] = 0
             return state
@@ -263,7 +284,10 @@ class DomainAgent:
                 for r in reranked
             ]
         except Exception as exc:  # noqa: BLE001
+            # 走到这里说明连 reranker 内部的降级都没兜住：retrieved_docs 保持检索节点的融合分数顺序
+            # （下面的重排赋值没执行，等于"没重排"而不是"排坏了"）
             state["trace"]["rerank_error"] = str(exc)
+        # 同样在 except 之外计时：降级也要留下耗时，慢和挂是两种告警
         state["trace"]["rerank_ms"] = int((time.monotonic() - t0) * 1000)
         return state
 
@@ -282,9 +306,11 @@ class DomainAgent:
             state["tool_calls"] = []
             return state
 
+        # [:3] 与 _generate 的 [:3] 是两处独立截断（改一处不会同步）；[来源] 前缀让模型能在理由里指认出处
         knowledge = "\n".join(
             f"[{d['source']}] {d['content']}" for d in state["retrieved_docs"][:3]
         )
+        # 用空串而不是 None 起头：它直接拼进 f-string，None 会在提示词里显示成字面量 "None"
         previous = ""
         if state["tool_results"]:
             # 多轮规划的关键：把上一轮结果原样给模型看，它才知道"再查一次"还是"够了"
@@ -293,6 +319,7 @@ class DomainAgent:
                 + json.dumps(state["tool_results"], ensure_ascii=False)
                 + "\n请根据结果判断下一步；信息足够时不要再调用工具，也不要重复相同调用。"
             )
+        # 两条消息：system 放决策规则+轮次，user 放事实材料；不带跨轮对话，历史摘要只在 generate 注入
         messages = [
             {
                 "role": "system",
@@ -316,14 +343,18 @@ class DomainAgent:
             temperature=0.1,          # 决策要稳定，不要创意
             tools=tools_schema,       # 只有传了 tools，模型才可能返回 tool_calls
         )
+        # 这里覆盖上轮 decision_ms，记录最后一轮决策耗时；不是多轮决策耗时总和。
         state["trace"]["decision_ms"] = int((time.monotonic() - t0) * 1000)
 
+        # 只包含此前工具节点已记录的签名；本轮 next_calls 内部没有再次去重，也不是持久化业务幂等键。
         executed = set(state["tool_history"])
         next_calls: list[dict[str, Any]] = []
         for tc in result.tool_calls:
             signature = self._tool_signature(tc.name, tc.arguments)
+            # 过滤以前轮次的同参调用；失败调用也已进 history，下一轮不能以相同参数重试它。
             if signature not in executed:      # 去重：同参数同工具第二次直接丢弃
                 next_calls.append({"name": tc.name, "arguments": tc.arguments})
+        # 模型工具名在这里尚未按 AGENT_ID 再授权；schema 可见性与执行权限校验是两回事。
         state["tool_calls"] = next_calls
         return state
 
@@ -332,13 +363,13 @@ class DomainAgent:
 
         第一次执行到 interrupt() 会抛 GraphInterrupt，把确认单交给调用方；
         resume 后本节点从头重跑，此时 interrupt() 直接返回人工结论，
-        因此高危工具只在确认通过后被执行一次。
+        因此正常路径只在批准后进入工具节点；这不是故障重放下的 exactly-once 保证。
 
         为什么必须整节点重跑：LangGraph 的恢复语义是「重放当前节点」，
         节点内 interrupt() 之前的代码会再执行一遍 —— 所以 interrupt 前的
         ensure_pending 必须幂等（已有 pending 就跳过），否则每次恢复都插一条审批单。
         """
-        risk = high_risk_calls(state["tool_calls"])   # 只把高危动作拿去审批，普通工具不受影响
+        risk = high_risk_calls(state["tool_calls"])   # 确认卡片只列高危动作；同批普通工具也等待该审批分支结束
         payload = pending_payload(risk, self.AGENT_NAME, state["conversation_id"])
         state["pending_confirmation"] = payload
         # 登记进审批表：后台"人工审批"页读的是这张表，不是 LangGraph 的状态
@@ -346,6 +377,7 @@ class DomainAgent:
                             state.get("user_id") or "", payload["actions"])
 
         # 这里是真正的挂起点：第一次进来会在这里中断，把 payload 抛给调用层
+        # 恢复从节点开头重放，再次执行 ensure_pending；不要把它理解为 Python 栈原地冻结后续跑。
         raw = interrupt(payload)
         # 恢复后拿到人工结论；兼容 {"approved": true} 和"同意/拒绝"这类自然语言
         approved, note = parse_decision(raw)
@@ -376,9 +408,9 @@ class DomainAgent:
         执行细节（校验/超时/重试/熔断）统一在 tools.executor。
 
         user_id / conversation_id 走运行时上下文，模型给的同号参数会被校验层拒绝，
-        既防越权，也让工单等写入能挂到正确的会话上。
+        防止模型改写这两个字段，并让写入关联会话；HTTP 用户身份认证仍需单独补齐。
         """
-        # 可信上下文：来自服务端会话，绝不来自模型参数
+        # 上下文不取自模型 arguments；但 user_id 最初来自未鉴权的 ChatRequest，尚非认证身份。
         context = {
             "user_id": state.get("user_id") or "",
             "conversation_id": state["conversation_id"],
@@ -388,13 +420,14 @@ class DomainAgent:
         results = [await invoke_tool(tc["name"], tc["arguments"], context=context)
                    for tc in state["tool_calls"]]
         for call, result in zip(state["tool_calls"], results):
-            # 把模型给的参数一起记进结果，前端/评测/面试复盘时能看清"传了什么"
+            # 把模型给的参数一起记进结果，前端与评测复盘时能看清"这条调用传了什么"
             result["arguments"] = call["arguments"]
         state["tool_results"].extend(results)
         # 记签名，供下一轮决策去重；同时作为"已经做过什么"的证据
         state["tool_history"].extend(
             self._tool_signature(tc["name"], tc["arguments"]) for tc in state["tool_calls"]
         )
+        # 一轮可含多个工具；max_tool_rounds 限制规划批次数，不等于最多调用三个工具。
         state["tool_round"] += 1
         state["trace"]["tool_rounds"] = state["tool_round"]
         # 工具结果同时进 trace：监控页和离线评测都读这里
@@ -413,7 +446,7 @@ class DomainAgent:
     async def _generate(self, state: AgentState) -> AgentState:
         """节点 6：组装最终回答。
 
-        消息拼装顺序是有讲究的（越靠后越"权威"）：
+        消息按以下顺序拼装；靠后放置有助于提示，但不能构成安全保证：
             1) system：角色话术 + 本次知识库内容
             2) 会话记忆：摘要 + 最近若干轮（Redis 里恢复，跨进程/跨重启）
             3) 协作建议：其他领域 Agent 的只读意见（若有）
@@ -422,7 +455,7 @@ class DomainAgent:
         """
         t0 = time.monotonic()
 
-        # 回答阶段多给一条知识（3 条），因为这里不调工具，纯靠上下文
+        # 回答和工具决策都只取前 3 条；即使重排返回 5 条，也不会全部进入提示词。
         knowledge = "\n---\n".join(
             f"[{d['source']}] {d['content']}" for d in state["retrieved_docs"][:3]
         )
@@ -434,8 +467,10 @@ class DomainAgent:
             max_turns=settings.max_conversation_turns,
             summary_trigger=settings.summary_trigger_turns,
         )
+        # 一条 user 消息算一个 Turn，后面 assistant 再算一个；配置里的 8/10 不是 8/10 对问答。
         memory.add_turn("user", state["user_query"])
         # 超过阈值才真正调模型做摘要；没超过就原样保留（避免每轮都花一次 token）
+        # 记忆只在 generate 注入；classify_intent 和 _decide_tools 当前不读取跨轮摘要，省略订单号可能失败。
         await memory.summarize_async()
 
         messages = memory.to_messages(system_prompt)
@@ -466,7 +501,7 @@ class DomainAgent:
             })
 
         if state["tool_results"]:
-            # 工具结果作为最具体的证据放在最后，模型会优先采信
+            # 把业务结果放在最后作为事实材料；当前只拼 data，success/error 没有传给生成模型。
             tool_context = "\n\n## 工具查询结果\n"
             for tr in state["tool_results"]:
                 data_str = json.dumps(tr.get("data", {}), ensure_ascii=False, indent=2)
@@ -483,6 +518,7 @@ class DomainAgent:
         reply = result.content
         memory.add_turn("assistant", reply)   # 回答也进记忆，下一轮才有多轮上下文
 
+        # 检测发生在生成之后，只修改状态标志；通用 handoff 不会在这里自动创建 HumanHandoff 记录。
         self._detect_handoff(state)           # 统一在这一步判定是否转人工
 
         if hasattr(memory_store, "persist"):
@@ -490,10 +526,12 @@ class DomainAgent:
             memory_store.persist(memory)
 
         state["final_response"] = reply
-        # 模型信息进 trace：面试/排障时能回答"这条回答用的哪个模型、花了多少 token"
+        # 模型信息进 trace：排障时能回答"这条回答用的哪个模型、花了多少 token"
         state["trace"]["model"] = result.model
+        # 仅最终生成调用的 usage；不含意图、咨询、工具决策、摘要和 embedding 的用量。
         state["trace"]["prompt_tokens"] = result.prompt_tokens
         state["trace"]["completion_tokens"] = result.completion_tokens
+        # 计时从本节点开头开始，含取记忆、摘要及持久化等工作，不等于供应商纯推理耗时。
         state["trace"]["generation_ms"] = int((time.monotonic() - t0) * 1000)
         return state
 
@@ -511,7 +549,7 @@ class DomainAgent:
             state["handoff"] = True
             state["handoff_reason"] = "complaint_domain"
         elif state["tool_results"] and all(not tr.get("success") for tr in state["tool_results"]):
-            # 调了工具但全失败：说明后端系统性故障，别让模型硬编答案
+            # 全失败也可能是权限拒绝/参数错误，不一定是系统故障；这里统一标记转人工。
             state["handoff"] = True
             state["handoff_reason"] = "tool_failure_all"
         elif not state["retrieved_docs"] and not state["tool_results"] and not state["tool_calls"]:
@@ -520,8 +558,8 @@ class DomainAgent:
             state["handoff_reason"] = "knowledge_gap"
 
     # ── Conditional edges ───────────────────────────────────────────────────
-    # 这几个函数必须是「纯函数」：LangGraph 可能在任意时刻调用它们来决定下一步，
-    # 里面不能有 IO，也不能改 state。
+    # 本项目把边函数写成无副作用判断，便于复现。框架支持异步路由；
+    # “不做 IO”是这里的设计约定，并不是 LangGraph 的强制限制。
 
     @staticmethod
     def _route_after_retrieval(state: AgentState) -> str:
@@ -564,8 +602,8 @@ class DomainAgent:
     ) -> AgentState:
         """跑完一轮完整流程（可能停在审批）。
 
-        返回的 state 里若有 pending_confirmation，说明流程中断在 await_approval，
-        调用方需要把确认单返回给前端，等人工决策后再调 resume()。
+        中断结果通过 __interrupt__ 携带确认单；节点尚未返回，不能依赖 pending_confirmation。
+        API 的 _respond 读取 Interrupt.value，前端确认后再调用 resume()。
         """
         # 初始 state 必须给全字段：TypedDict 不做默认值填充，
         # 少给字段会在第一个节点就 KeyError
@@ -592,6 +630,7 @@ class DomainAgent:
         graph = await self._get_graph()
         # ainvoke 返回的是最终 state；若中途 interrupt，返回值里会多一个 __interrupt__ 键，
         # api/chat.py 靠它判断"这条是待审批"而不是正常回答
+        # run 每轮重置工具结果/history/approval；跨轮自然语言记忆另存在 Redis，不能混为图的执行状态。
         return await graph.ainvoke(initial, self._config(conversation_id))
 
     async def consult(self, user_query: str) -> dict[str, Any]:
@@ -600,6 +639,7 @@ class DomainAgent:
         多 Agent 协同时，辅助 Agent 走这条路径：只检索 + 生成建议。
         好处是"帮忙看一眼"不会触发退款/建单，避免一次用户提问产生两笔业务操作。
         """
+        # consult 使用同一全库检索器，没有按领域 metadata 过滤；领域差别主要是提示词。
         results = await self.retriever.retrieve(user_query)
         if results:
             results = await self.reranker.rerank(user_query, results)
@@ -627,10 +667,11 @@ class DomainAgent:
         }
 
     async def resume(self, conversation_id: int, decision: Any) -> AgentState:
-        """带着人工结论从暂停点继续。进程重启后同样可用——状态在 PostgreSQL 里。
+        """带着人工结论从暂停点继续。使用 PostgreSQL saver 且相同 thread_id 时可跨进程恢复；内存降级不具备此能力。
 
         decision 可以是 {"approved": true, "note": "..."}，也可以是"同意"/"拒绝"。
         """
         graph = await self._get_graph()
         # Command(resume=...) 让 LangGraph 把当前节点重放一遍，interrupt() 这次直接返回 decision
+        # 先前审批表已提交但这里恢复失败，会产生“审批已处理、图未完成”的窗口，需要人工补偿。
         return await graph.ainvoke(Command(resume=decision), self._config(conversation_id))

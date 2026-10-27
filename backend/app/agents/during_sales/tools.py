@@ -1,7 +1,7 @@
 """售中 Agent 工具：查询待支付订单、支付状态、修改地址和申请发票。
 
 订单能力统一查询 PostgreSQL 业务表，不再使用进程内演示数据。
-user_id 由运行时上下文注入，模型不能指定或查询其他用户的订单。
+user_id 不由模型参数提供，并在 SQL 过滤；能否防用户冒用身份仍取决于 API 入口认证。
 """
 
 from __future__ import annotations
@@ -65,6 +65,7 @@ async def _query_unpaid_order(user_id: str = "") -> ToolResult:
             .join(User, User.id == Order.user_id)
             .where(
                 User.external_id == user_id,
+                # 只查当前用户未支付或失败订单；支付方式列表是常量，并非实时查询支付渠道。
                 Order.status.in_(("unpaid", "payment_failed")),
             )
             .order_by(Order.created_at.desc())
@@ -99,6 +100,7 @@ async def _modify_address(
         order = await _find_own_order(session, order_id, user_id)
         if order is None:
             return ToolResult(success=False, error=f"未找到订单 {order_id}，或该订单不属于当前账号")
+        # 必须“已支付且尚未发货”同时满足；or 写的是任一不满足就拒绝。
         if order.status != "paid" or order.shipped_at is not None:
             return ToolResult(
                 success=False,
@@ -106,7 +108,9 @@ async def _modify_address(
                 data={"order_id": order_id, "current_status": order.status},
             )
         order_db_id = order.id
+        # 先保留旧值，业务提交后用于审计对照。
         old_address = order.shipping_address or ""
+        # 在当前 session 内修改 ORM 对象才会被 commit 持久化；没有远程物流系统调用。
         order.shipping_address = new_address
         order.updated_at = _now()
         await session.commit()
@@ -134,6 +138,7 @@ async def _apply_invoice(
         order = await _find_own_order(session, order_id, user_id)
         if order is None:
             return ToolResult(success=False, error=f"未找到订单 {order_id}，或该订单不属于当前账号")
+        # 目前只排除 unpaid，payment_failed 等状态没有一起拒绝；注释不能把它说成完整“已支付”验证。
         if order.status == "unpaid":
             return ToolResult(
                 success=False,
@@ -144,6 +149,7 @@ async def _apply_invoice(
         amount = _money(order.amount)
 
     requested_at = _now()
+    # 生成演示申请号后只写审计，没有独立发票申请表、财务接口或实际开票执行。
     request_id = f"INV{requested_at.strftime('%Y%m%d%H%M%S')}{order_db_id:03d}"
     await record_audit(
         action="invoice_requested",
@@ -159,6 +165,7 @@ async def _apply_invoice(
         "type": invoice_type,
         "title": title,
         "status": "pending",
+        # 这句只是本项目的返回文案：没有对接财务系统，"已受理"不代表发票已开出。
         "status_detail": "发票申请已受理，等待财务系统开具",
         "created_at": requested_at.isoformat(sep=" "),
     })

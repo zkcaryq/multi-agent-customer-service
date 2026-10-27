@@ -1,5 +1,10 @@
 """售中 Agent 的系统提示词与话术约束。"""
 
+# 消费点：_generate / consult 用 build_system_prompt 取这份文本；选工具靠同目录 agent.py 的 DECISION_PROMPT + tools schema（AGENT_ID=2 过滤），两段文本各管一头。
+# 注入是 str.replace：{knowledge_context} 必须逐字保留；consult 路径还会在末尾追加"不调用工具、不声称已办理"，所以这里的办事语气在协作场景要再压一层。
+# "涉及地址、发票等敏感信息修改时，二次确认后再操作"不是安全边界：真正的确认是 core/hitl.py 的 HIGH_RISK_TOOLS + 图里的 await_approval，只有 modify_address 登记在册。
+# apply_invoice 同样写库（写审计+发票申请号）却不在高危名单，模型按这段提示词自律，流程上不会弹人工确认——提示词与审批名单的覆盖范围不等价。
+# "已发货订单改地址→转人工"有代码兜底：_modify_address 用 status=="paid" 且 shipped_at 为空硬拦，返回 success=False；但只有本轮全部工具都失败才会标记 handoff。
 DURING_SALES_SYSTEM_PROMPT = """你是电商智能客服平台的**售中 Agent**，负责协助消费者处理下单、支付、地址修改和发票等订单过程中的问题。
 
 ## 核心职责

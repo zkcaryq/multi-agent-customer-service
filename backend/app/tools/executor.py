@@ -10,9 +10,10 @@
 - 改策略只改这一个文件；
 - 测试可以直接调 `invoke_tool` 验证策略，不需要跑整个 Agent。
 
-【最重要的契约：永不抛异常】
-返回值永远是 `{"tool", "success", "error", "duration_ms", ...}`。
-调用方（`base_agent._call_tools`）因此可以安全地列表推导批量执行；
+【主要契约：预期调用失败转结构化结果】
+注册缺失、校验报错、熔断和 handler 的常规异常转成结果字典。
+校验函数自身异常、非法返回对象、任务取消等仍可能传播，不能承诺“永不抛异常”。
+调用方（`base_agent._call_tools`）按顺序收集正常返回的结果；
 模型也能从 `success=false` 里看到失败原因，进而决定"换个工具/转人工"。
 """
 
@@ -35,6 +36,7 @@ def _fail(name: str, error: str, t0: float, **extra: Any) -> dict[str, Any]:
         "tool": name,
         "success": False,
         "error": error,
+        # monotonic 不受系统校时影响；执行器总耗时包括各次尝试和退避等待。
         "duration_ms": int((time.monotonic() - t0) * 1000),
     }
     out.update(extra)
@@ -50,7 +52,8 @@ async def _call_handler(spec: ToolSpec, arguments: dict[str, Any]) -> ToolResult
     handler = spec.handler
     if inspect.iscoroutinefunction(handler):
         return await handler(**arguments)
-    # 参数用 partial 预绑定，to_thread 只接收"无参可调用对象"，避免 kwargs 在跨线程时丢失
+    # partial 在这里预绑定参数；to_thread 本身也支持 *args/**kwargs，这不是它的限制。
+    # 取消等待不能强行终止已启动的线程；同步写工具超时后可能仍执行，重试必须考虑业务幂等。
     return await asyncio.to_thread(functools.partial(handler, **arguments))
 
 
@@ -60,21 +63,23 @@ async def invoke_tool(
     *,
     context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """执行一个工具，永远返回结构化结果，不向调用方抛异常。
+    """执行一个工具，把预期失败和 handler 的常规异常转成结构化结果。
 
     context 是运行时可信参数（如 user_id、conversation_id），不会出现在给模型的
-    function schema 里 —— 模型看不见也就伪造不了，越权在这一层被挡住。
+    function schema 里 —— 校验层显式拒绝模型提供的上下文字段；真实用户认证和资源授权仍由入口/handler 负责。
     """
     t0 = time.monotonic()
 
     # ① 注册检查：模型可能幻觉出一个不存在的工具名（甚至在脏输出里给出 "[]"），
     #    这里直接判失败，而不是 KeyError
+    # 这里只按全局名字取工具，没有 agent_id 授权参数；按域导出 schema 不等于执行端访问控制。
     spec = tool_registry.get(tool_name)
     if spec is None:
         return _fail(tool_name, "工具未注册", t0)
 
     # ② 入参校验：未声明参数、缺必填、类型不符、伪造可信上下文，全部在这里拦下。
     #    返回 (归一化后的参数, 错误列表)；有错误就不执行 handler。
+    # 校验发生在 try 外；若传入非字典等意外类型，可能直接抛异常，调用协议仍有前置假设。
     normalized, errors = validate_arguments(spec, arguments or {}, context)
     if errors:
         return _fail(tool_name, "入参校验失败: " + "; ".join(errors), t0, validation_errors=errors)
@@ -91,6 +96,7 @@ async def invoke_tool(
 
     async def attempt() -> ToolResult:
         # 超时算一次失败，交给外层退避重试；重试耗尽后计入熔断
+        # 单次尝试超时；wait_for 会等待取消完成，所以不是整个调用绝不超过 5 秒的硬保证。
         return await asyncio.wait_for(_call_handler(spec, normalized), timeout=timeout_s)
 
     try:
@@ -110,11 +116,13 @@ async def invoke_tool(
 
     # ⑥ 业务级失败（handler 正常返回但 result.success=False）不算熔断失败：
     #    比如"订单不属于当前用户"是预期内的业务结果，不是系统故障。
+    # 业务失败也清零系统失败计数；熔断统计的是技术调用是否抛错，而非业务是否办理成功。
     breaker.record_success()
     return {
         "tool": tool_name,
         "success": result.success,
         "data": result.data,
         "error": result.error,
+        # monotonic 不受系统校时影响；执行器总耗时包括各次尝试和退避等待。
         "duration_ms": int((time.monotonic() - t0) * 1000),
     }

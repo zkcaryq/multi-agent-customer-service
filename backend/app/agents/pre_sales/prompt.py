@@ -1,5 +1,10 @@
 """售前 Agent 的系统提示词与话术约束。"""
 
+# 消费点：base_agent 的 _generate / consult 用 build_system_prompt 取这份文本；决定"调哪个工具"的是同目录 agent.py 的 DECISION_PROMPT 加 tools schema，两者互不影响。
+# 注入方式是 str.replace 而不是 str.format：{knowledge_context} 必须逐字保留，改名会静默注入失败（模型看到占位符原文）；其余字面花括号不需要转义。
+# "工具使用"一段只影响模型措辞依据，不构成授权：能否调用取决于 tool_registry 按 AGENT_ID=1 过滤出的 schema，越权工具在这里写进去也拿不到。
+# 本域四个工具都是查询，未登记进 core/hitl.py 的 HIGH_RISK_TOOLS，所以售前正常路径不会停在 await_approval。
+# "不编造信息"靠话术自律，没有后置校验；检索为空时上游传"暂无匹配知识"，而工具失败时 _generate 只拼 data 段（不带 success/error 字段）。
 PRE_SALES_SYSTEM_PROMPT = """你是电商智能客服平台的**售前 Agent**，负责为消费者提供商品咨询、规格对比、库存查询、优惠信息和会员服务。
 
 ## 核心职责
@@ -30,4 +35,4 @@ PRE_SALES_SYSTEM_PROMPT = """你是电商智能客服平台的**售前 Agent**�
 ## 当前知识库
 
 {knowledge_context}
-"""
+"""   # 模块级常量、运行时不可改：_generate 每轮只做一次 replace，改文案要重启进程；后台 GET /admin/agents 直接回显这段原文

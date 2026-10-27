@@ -5,30 +5,33 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
+# 类型选择对应 schema.sql：金额一律 Numeric（浮点会丢精度）、时间用 DateTime（naive，靠连接时区锁 UTC）
 from sqlalchemy import (
-    BigInteger,
+    BigInteger,       # 只有 audit_log.id 用，量级最大
     Boolean,
     DateTime,
     ForeignKey,
-    Index,
+    Index,            # 手工索引：唯一部分索引与查询热点
     Integer,
     Numeric,
     String,
     Text,
     UniqueConstraint,
-    func,
-    text,
+    func,             # func.now() 作 server_default：时间由 PG 写，不用应用时钟
+    text,             # 部分索引的 WHERE 谓词只能是原生 SQL 片段
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
-    pass
+    pass   # 唯一的 metadata：engine.init_db 的 create_all 与所有表的 DDL 都挂在这一个注册表上
 
 
 # ── Model registry ────────────────────────────────────────────────────────────
 
 class ModelRegistry(Base):
+    """模型清单表：schema.sql 里的配置表，当前没有任何代码读写它（模型实际来自 settings 的 LLM_MODEL_*）。"""
+
     __tablename__ = "model_registry"
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -36,16 +39,16 @@ class ModelRegistry(Base):
     provider: Mapped[str] = mapped_column(String(32), nullable=False)
     display_name: Mapped[Optional[str]] = mapped_column(String(128))
     endpoint_url: Mapped[str] = mapped_column(String(512), nullable=False)
-    api_key_ref: Mapped[str] = mapped_column(String(128), nullable=False)
+    api_key_ref: Mapped[str] = mapped_column(String(128), nullable=False)   # 只存凭据的"引用名"，不存密钥本身
     context_window: Mapped[Optional[int]] = mapped_column(Integer)
     max_tokens: Mapped[Optional[int]] = mapped_column(Integer)
     pricing_tier: Mapped[Optional[str]] = mapped_column(String(16))
-    cost_per_1k_input: Mapped[Optional[float]] = mapped_column(Numeric(10, 6))
+    cost_per_1k_input: Mapped[Optional[float]] = mapped_column(Numeric(10, 6))   # 6 位小数：单价量级小，Integer 会归零
     cost_per_1k_output: Mapped[Optional[float]] = mapped_column(Numeric(10, 6))
-    status: Mapped[str] = mapped_column(String(16), default="active")
+    status: Mapped[str] = mapped_column(String(16), default="active")       # Python 侧 default（插入时写），不是数据库 DEFAULT
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())   # 没有 ON UPDATE 触发器：不手工赋值就永远等于插入时间
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)      # 软删标记：查询侧没人过滤它，只有鉴权路径检查
 
 
 # ── Content safety ────────────────────────────────────────────────────────────

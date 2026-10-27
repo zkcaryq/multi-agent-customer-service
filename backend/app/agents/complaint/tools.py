@@ -36,14 +36,17 @@ _SEVERITY_LABEL = {"high": "高危", "medium": "一般", "low": "轻微"}
 def classify_complaint(text: str) -> tuple[str, str, int]:
     """返回 (severity, category, sla_hours)。规则可解释，比让模型直接打分更好审计。"""
     content = text or ""
+    # 未命中规则默认一般投诉、24 小时；只是 SLA 字段建议，没有自动计时调度。
     severity, sla = "medium", 24
     for level, keywords, hours in _SEVERITY_RULES:
+        # 顺序优先，命中第一档就 break，不累计多条规则的分数。
         if any(k in content for k in keywords):
             severity, sla = level, hours
             break
 
     category = "其他投诉"
     for name, keywords in _CATEGORY_RULES:
+        # 顺序优先，命中第一档就 break，不累计多条规则的分数。
         if any(k in content for k in keywords):
             category = name
             break
@@ -60,6 +63,7 @@ async def _create_service_ticket(
     severity, category, sla_hours = classify_complaint(f"{detail} {order_id}")
 
     async with async_session_factory() as session:
+        # 已有会话直接取用，当前函数未再次验证 user_id 归属，依赖入口保证上下文正确。
         conv = (await session.get(Conversation, conversation_id))
         if conv is None:
             # 自检/脚本直连时会话可能还不存在，先补一条归属当前用户的会话
@@ -75,8 +79,10 @@ async def _create_service_ticket(
             conv = Conversation(user_id=user.id, agent_id=agent_row, status="open",
                                 title=category, source="complaint_agent")
             session.add(conv)
+            # 为脚本补建会话时先取得主键，工单外键再引用；原请求 conversation_id 不会自动同步改变。
             await session.flush()
 
+        # 每次调用插新行，没有动作幂等键；图重放或网络重试可能重复建工单。
         ticket = HumanHandoff(
             conversation_id=conv.id,
             reason=category,
@@ -86,7 +92,9 @@ async def _create_service_ticket(
         )
         session.add(ticket)
         await session.commit()
+        # 读取数据库生成的 ID，才能构造展示用 TS-编号。
         await session.refresh(ticket)
+        # 格式化为至少六位数，不是额外工单表的独立业务编号列。
         ticket_no = f"TS-{ticket.id:06d}"
 
     await record_audit(
@@ -105,6 +113,7 @@ async def _create_service_ticket(
         "category": category,
         "sla_hours": sla_hours,
         "status": ticket.status,
+        # 数据库工单存在与真人已接单是两件事；代码没有保证经理会在 SLA 内联系的调度系统。
         "next_step": "已生成人工工单，客服经理将在 SLA 内联系您",
     })
 

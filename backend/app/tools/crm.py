@@ -1,6 +1,6 @@
 """CRM 侧只读工具：客户画像、会员权益、历史消费与服务记录。
 
-简历里"联动订单、CRM、工单多套内部系统"的 CRM 部分落在这里。
+订单/CRM/工单三套内部系统的 CRM 这一路落在这里。
 只暴露只读能力，且 user_id 由运行时上下文注入，模型无法指定查谁。
 """
 
@@ -50,18 +50,21 @@ async def _load_user(session, user_id: str) -> tuple[User | None, list, list]:
 async def _query_customer_profile(user_id: str = "") -> ToolResult:
     """会员等级、积分、标签 + 累计消费、订单数、未完成退款。"""
     async with async_session_factory() as session:
+        # 画像来自同一项目 PG 的 users/attributes/tags，没有远程企业 CRM API。
         user, attrs, tags = await _load_user(session, user_id)
         if user is None:
             return ToolResult(success=False, error="未识别当前用户，请重新登录")
 
         order_count, spent = (await session.execute(
             select(func.count(Order.id), func.coalesce(func.sum(Order.amount), 0)).where(
+                # 当前只剔除 unpaid，payment_failed 等仍可能纳入 lifetime_spend，不能称为财务确认收入。
                 Order.user_id == user.id, Order.status != "unpaid"
             )
         )).one()
         open_refunds = (await session.execute(
             select(func.count(Refund.id)).where(
                 Refund.user_id == user.id,
+                # 未终态退款计数；业务含义要与退款部分唯一索引保持一致。
                 Refund.status.notin_(["refunded", "rejected", "cancelled"]),
             )
         )).scalar() or 0
@@ -104,6 +107,7 @@ async def _query_service_history(user_id: str = "") -> ToolResult:
         )).scalar() or 0
 
         recent = (await session.execute(
+            # 读取工单摘要用于服务历史，不对话内容做额外 LLM 总结。
             select(HumanHandoff.reason, HumanHandoff.status)
             .join(Conversation, Conversation.id == HumanHandoff.conversation_id)
             .where(Conversation.user_id == user.id)
@@ -127,7 +131,7 @@ def register_crm_tools() -> None:
             context_params=["user_id"],
         ),
         _query_customer_profile,
-        agent_id=None,  # 三个业务 Agent 都可用
+        agent_id=None,  # 四个领域 Agent 都可见
     )
 
     tool_registry.register(
@@ -139,5 +143,6 @@ def register_crm_tools() -> None:
             context_params=["user_id"],
         ),
         _query_service_history,
+        # 公共只读工具对四域导出；能看见 schema 不意味着已完成 HTTP 用户身份认证。
         agent_id=None,
     )

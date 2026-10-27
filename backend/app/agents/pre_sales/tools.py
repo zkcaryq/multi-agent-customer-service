@@ -9,6 +9,7 @@ from app.tools.registry import tool_registry
 
 # ── Mock data ─────────────────────────────────────────────────────────────────
 
+# 固定商品样例，与 data 知识库中的商品篇目不是同一份实时商品系统。
 _MOCK_PRODUCTS: dict[str, dict] = {
     "iphone15": {
         "name": "iPhone 15 Pro",
@@ -25,6 +26,7 @@ _MOCK_PRODUCTS: dict[str, dict] = {
     },
 }
 
+# 固定库存样例，不随下单扣减，也没有外部库存 API。
 _MOCK_INVENTORY: dict[str, list[dict]] = {
     "iphone15-256": [
         {"warehouse": "北京仓", "stock": 156, "eta_days": 1},
@@ -37,12 +39,14 @@ _MOCK_INVENTORY: dict[str, list[dict]] = {
     ],
 }
 
+# 演示券列表不按当前日期过滤；不要把旧有效期样例当成正在进行的促销。
 _MOCK_COUPONS: list[dict] = [
     {"code": "NEW100", "type": "新人券", "amount": 100, "min_spend": 500, "valid_until": "2026-06-30"},
     {"code": "618SALE", "type": "大促券", "amount": 50, "min_spend": 300, "valid_until": "2026-06-18"},
     {"code": "PLUS95", "type": "会员券", "amount": 0, "desc": "PLUS 会员 95 折", "valid_until": "长期"},
 ]
 
+# 这里是固定会员数据；公共 query_customer_profile 则查询本地 PG，二者来源不同。
 _MOCK_MEMBERSHIPS: dict[str, dict] = {
     "user_001": {"level": "PLUS 会员", "points": 12580, "benefits": ["全场 95 折", "双倍积分", "免运费", "专属客服"]},
     "user_002": {"level": "普通会员", "points": 2100, "benefits": ["积分抵现", "生日月双倍积分"]},
@@ -60,6 +64,7 @@ def _normalize(text: str) -> str:
 def _query_product(product_name: str = "", specs: str = "") -> ToolResult:
     """Query product information."""
     t0 = time.monotonic()
+    # 仅简单归一化商品名称，specs 参数当前没有用于真正的规格过滤。
     q = _normalize(product_name)
     results = []
     for key, info in _MOCK_PRODUCTS.items():
@@ -73,6 +78,7 @@ def _query_product(product_name: str = "", specs: str = "") -> ToolResult:
 def _check_inventory(product_name: str = "", sku: str = "") -> ToolResult:
     """Check inventory for a product."""
     t0 = time.monotonic()
+    # 只按是否含 256 在两个样例间选择，任意其他商品也会落 512；用于协议演示而非真实库存查询。
     key = f"iphone15-256" if "256" in product_name or "256" in sku else "iphone15-512"
     data = _MOCK_INVENTORY.get(key, [])
     return ToolResult(success=True, data={"product": product_name or sku, "inventory": data}, duration_ms=int((time.monotonic() - t0) * 1000))
@@ -87,6 +93,7 @@ def _check_coupons(user_id: str = "") -> ToolResult:
 def _check_membership(user_id: str = "") -> ToolResult:
     """Check user membership level and benefits."""
     t0 = time.monotonic()
+    # 未知用户返回普通会员样例；不是用户认证或真实 CRM 兜底。
     info = _MOCK_MEMBERSHIPS.get(user_id, _MOCK_MEMBERSHIPS["user_002"])
     return ToolResult(success=True, data={"membership": info}, duration_ms=int((time.monotonic() - t0) * 1000))
 
@@ -148,6 +155,7 @@ def register_pre_sales_tools(agent_id: int = 1) -> None:
             display_name="查询会员等级",
             description="查询用户会员等级、积分余额和专属权益",
             parameters=[
+                # 此演示工具仍把 user_id 暴露给模型；不能把订单/CRM 的 context_params 机制概括为所有工具都有。
                 ToolParameterDef("user_id", "string", "用户 ID", is_required=True),
             ],
         ),

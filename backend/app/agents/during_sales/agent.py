@@ -16,10 +16,13 @@ _DECISION_PROMPT = (
 
 class DuringSalesAgent(DomainAgent):
     AGENT_ID = 2
+    # 岗位标识同时用于 provider 模型配置、日志和图 thread_id；不是单独训练的一套模型。
     AGENT_NAME = "during_sales"
+    # 决策提示词只负责选工具；最终自然语言回答用另一个 system prompt。
     DECISION_PROMPT = _DECISION_PROMPT
 
     def register_tools(self) -> None:
+        # 子类仅绑定领域工具，公共图结构由 DomainAgent 复用，减少四域审批逻辑重复。
         register_during_sales_tools(agent_id=self.AGENT_ID)
 
     def build_system_prompt(self, knowledge: str) -> str:

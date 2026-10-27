@@ -57,14 +57,17 @@ async def _get_or_create_user(user_id: str) -> int:
     async with async_session_factory() as session:
         from sqlalchemy import select
 
+        # 执行用户查找 SQL；external_id 来自请求字段，查到用户不等于完成了登录认证。
         result = await session.execute(
             select(User).where(User.external_id == user_id).limit(1)
         )
         user = result.scalar_one_or_none()
+        # 已有用户复用数据库主键，供 Conversation.user_id 外键使用。
         if user:
             return user.id
 
         user = User(external_id=user_id, nickname=user_id, phone="")
+        # 把待新增对象加入事务；并发首次请求仍可能竞争 external_id 唯一约束。
         session.add(user)
         await session.commit()
         return user.id
@@ -91,10 +94,12 @@ async def _get_or_create_conversation(
             existing = (await session.execute(
                 select(Conversation).where(
                     Conversation.id == requested_id,
+                    # 这是按“请求声称的用户”检查会话归属；当前无用户 JWT，不能视为完整防冒用机制。
                     Conversation.user_id == user_db_id,
                 )
             )).scalar_one_or_none()
             if existing is not None:
+                # 复用会话时更新当前主域；Redis 仍按会话共享，图检查点按 agent:conversation 分开。
                 existing.agent_id = agent_id
                 existing.last_message_at = _utcnow()
                 await session.commit()
@@ -111,6 +116,7 @@ async def _get_or_create_conversation(
         )
         session.add(conv)
         await session.commit()
+        # 提交后从数据库读取自增主键/默认字段，确保返回真实 ID。
         await session.refresh(conv)
         return conv.id
 
@@ -141,7 +147,7 @@ async def _save_trace(message_id: int, state: dict) -> None:
 
     为什么在这里做映射而不是让 Agent 直接写库：
     Agent 只负责"产生 trace"，落库格式（列名、拆分表）属于接口层职责；
-    这样离线脚本/评测调用 Agent 时不产生数据库副作用，也能拿到同一份 trace。
+    这样离线脚本可直接读取 trace；但 Agent 内的审批和工具仍可能写库，不能笼统称为无副作用。
     """
     trace = state.get("trace", {})
     if not trace:
@@ -174,6 +180,7 @@ async def _save_trace(message_id: int, state: dict) -> None:
                 tool_name=tc.get("tool", "unknown"),
                 parameters=mask_sensitive(json.dumps(tc.get("arguments", {}), ensure_ascii=False)),
                 is_success=tc.get("success", False),
+                # 只截断结果摘要，未对这段和全部 audit detail 做脱敏；不能把 parameters 的脱敏扩大为全部日志。
                 result_summary=str(tc.get("data", ""))[:256] if tc.get("data") else tc.get("error", ""),
                 duration_ms=tc.get("duration_ms"),
             ))
@@ -185,12 +192,14 @@ async def _persist_exchange(
 ) -> int | None:
     """写入一轮问答。DB 故障不影响答复，只降级为不落库。"""
     try:
+        # 用户消息、机器人消息、trace 分别提交，整轮问答不是一个原子事务。
         await _save_message(conversation_id, "user", user_msg)
         bot_msg_id = await _save_message(conversation_id, "bot", assistant_reply)
         await _save_trace(bot_msg_id, state)
         return bot_msg_id
     except Exception as e:
         log.warning("exchange persist failed conv=%s: %s", conversation_id, e)
+        # 这个降级只覆盖对话结束后的消息/trace 写入；起始建会话失败仍返回 503。
         return None
 
 
@@ -205,6 +214,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
     此时 reply 是确认提示语，客户端需要调 /chat/confirm 继续。
     """
     # Step 1: Mask sensitive info + content safety check
+    # 脱敏文本送模型；后面的 _respond 仍传 req.message 原文落 messages，不是全链路不保存原文。
     clean_msg = mask_sensitive(req.message)
     safety = content_safety.check(clean_msg)
     if not safety.passed:
@@ -215,12 +225,14 @@ async def chat(req: ChatRequest) -> ChatResponse:
         )
 
     # Step 2: Intent classification → route to agent
+    # 发生在 Agent 执行 try 块外；分类返回结构异常并不一定转换成下面定义的 ProviderError 503。
     plan = await coordinator.plan(clean_msg)
     intent = plan.intent
 
     # 会话 ID 同时作为数据库主键、Redis memory key 和 LangGraph thread_id。
     # 先确定真实会话，再启动 Agent，避免每轮对话切换 ID 导致上下文断裂。
     try:
+        # 当前用户身份来自客户端 user_id，没有认证依赖；投产前需要从可信令牌派生这个值。
         user_db_id = await _get_or_create_user(req.user_id)
         conversation_id = await _get_or_create_conversation(
             user_db_id, intent.target_agent, req.conversation_id,
@@ -271,26 +283,30 @@ async def chat(req: ChatRequest) -> ChatResponse:
 @router.post("/chat/confirm", response_model=ChatResponse)
 async def chat_confirm(req: ConfirmRequest) -> ChatResponse:
     """用户侧/前端审批入口。"""
+    # 公共确认路由当前无 require_staff/所有权检查；后台审批鉴权不自动覆盖此入口。
     return await apply_approval(req)
 
 
 async def apply_approval(req: ConfirmRequest) -> ChatResponse:
     """人工审批回调：从暂停点恢复执行。会话列表页/后台坐席共用这一条逻辑。
 
-    状态存在 PostgreSQL 的 checkpoint 里，所以重启服务、换一个实例都能续跑。
+    当 saver 确实是 PostgreSQL 且 thread_id 一致时可跨进程续跑；内存降级不支持。
     结论先落到 approval_requests（含超时判定），再驱动图恢复——超时会让
     真正生效的结论从"批准"变成"自动拒绝"。
     """
+    # 未知名字在 router 中默认落售前；此处没有使用枚举校验确认域是否合法。
     agent = agent_by_name(req.agent)
     resume = getattr(agent, "resume", None)
     if resume is None:
         raise HTTPException(status_code=400, detail=f"{req.agent} 不支持人工审批")
 
+    # 先提交审批投影，再恢复图；二者之间进程故障会留下需要补偿的已决定记录。
     verdict = await decide(req.agent, req.conversation_id, req.approved, req.note, req.approver)
     if not verdict.get("ok"):
         raise HTTPException(status_code=409, detail=verdict.get("error", "审批请求不可处理"))
 
     try:
+        # 实际从检查点恢复的是原待执行工具参数，不重新用批准请求生成业务参数。
         state = await resume(
             req.conversation_id,
             {"approved": verdict["approved"], "note": verdict["note"], "approver": verdict["approver"]},
@@ -330,12 +346,15 @@ async def _respond(
     """把 LangGraph 的返回统一成接口响应；interrupt（待审批）单独标注。"""
     # 节点在 interrupt() 处抛异常，它自己写的 pending_confirmation 不会落到 state，
     # 确认单只能从 Interrupt 对象的 value 里取。
+    # 读框架中断返回值，区别“等待审批”与 final_response 为空的普通状态。
     interrupts = state.get("__interrupt__") or []
+    # 当前只处理第一个中断，适合本图单审批节点；不是并行多中断通用聚合器。
     pending = getattr(interrupts[0], "value", None) if interrupts else None
     reply = state["final_response"] or (pending or {}).get("prompt", "")
 
     message_id = None
     if reply:
+        # 仅有 reply 才落消息；审批提示也会被持久化为一次回复。
         message_id = await _persist_exchange(conversation_id, user_msg, reply, state)
 
     return ChatResponse(
@@ -345,6 +364,7 @@ async def _respond(
         intent=intent_name,
         handoff=state.get("handoff", False),
         handoff_reason=state.get("handoff_reason", ""),
+        # 响应带部分运行轨迹；状态中有的 decision/coordination 字段不一定全部映射到数据库列。
         trace=state.get("trace"),
         pending_confirmation=pending,
     )

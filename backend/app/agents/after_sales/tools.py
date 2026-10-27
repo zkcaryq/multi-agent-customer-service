@@ -1,7 +1,7 @@
 """After-sales agent tools — 查订单、查物流、发起退款、查退款进度。
 
 全部打到真实业务表（orders / order_items / refunds），
-`user_id` 由运行时上下文注入而不是模型给参数，所以查不到别人的单。
+`user_id` 从运行时上下文注入，并在 SQL 中过滤归属；入口身份尚未认证，不能宣称绝对无法越权。
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ def _now() -> datetime:
 
 def _money(value: Any) -> float:
     """Numeric 列取出来是 Decimal，必须转 float：Decimal 既不能 json.dumps，
-    也进不了 LangGraph 的 msgpack checkpoint。"""
+    这里转成 float 主要为了统一普通 JSON 输出；是否支持 Decimal 取决于 serializer。"""
     return float(value) if isinstance(value, Decimal) else float(value or 0)
 
 
@@ -73,7 +73,7 @@ def _logistics_data(order: Order) -> dict[str, Any]:
 
 
 async def _find_own_order(order_id: str, user_id: str) -> tuple[Order | None, str | None]:
-    """按订单号 + 当前登录用户取单。查不到统一回同一句话，不透露订单是否存在。"""
+    """按订单号 + 上下文 user_id 取单（当前 HTTP 入口尚无用户登录认证）。查不到统一回同一句话，不透露订单是否存在。"""
     async with async_session_factory() as session:
         row = (await session.execute(
             select(Order)
@@ -87,6 +87,7 @@ async def _find_own_order(order_id: str, user_id: str) -> tuple[Order | None, st
 
 
 async def _check_logistics(order_id: str = "", user_id: str = "") -> ToolResult:
+    # 先归属查询再处理；失败返回业务 ToolResult，不抛网络异常，因此不会自动退避重试。
     order, err = await _find_own_order(order_id, user_id)
     if err:
         return ToolResult(success=False, error=err)
@@ -100,6 +101,7 @@ async def _check_logistics(order_id: str = "", user_id: str = "") -> ToolResult:
 
 
 async def _query_order(order_id: str = "", user_id: str = "") -> ToolResult:
+    # 先归属查询再处理；失败返回业务 ToolResult，不抛网络异常，因此不会自动退避重试。
     order, err = await _find_own_order(order_id, user_id)
     if err:
         return ToolResult(success=False, error=err)
@@ -108,13 +110,17 @@ async def _query_order(order_id: str = "", user_id: str = "") -> ToolResult:
 
 def _refund_window(order: Order, reason: str) -> tuple[bool, str]:
     """返回 (是否在时限内, 说明)。"""
+    # 优先签收/完成时间，缺失才回退发货、支付时间；提示中的“签收后”不总是精确基准。
     start = order.completed_at or order.shipped_at or order.paid_at
     if start is None:
         return False, "订单尚未支付，无需退款"
 
+    # 质量分类是关键词规则，不是模型审核；这些天数是演示业务策略，不当作法律结论。
     quality = any(k in (reason or "") for k in _QUALITY_HINTS)
     limit = RETURN_WINDOW_DAYS["quality" if quality else "no_reason"]
+    # timedelta.days 向下按整天计数；不是严格精确到秒的 7×24 小时边界。
     used = (_now() - start).days
+    # 等于 limit 仍允许；缺少完整订单状态转换校验，仅通过期限并不表示现实退款一定合规。
     if used > limit:
         return False, (
             f"已超过{'质量' if quality else '无理由'}退货期限（签收后 {used} 天，限 {limit} 天），请转人工处理"
@@ -123,6 +129,7 @@ def _refund_window(order: Order, reason: str) -> tuple[bool, str]:
 
 
 async def _request_refund(order_id: str = "", reason: str = "", user_id: str = "") -> ToolResult:
+    # 先归属查询再处理；失败返回业务 ToolResult，不抛网络异常，因此不会自动退避重试。
     order, err = await _find_own_order(order_id, user_id)
     if err:
         return ToolResult(success=False, error=err)
@@ -131,7 +138,9 @@ async def _request_refund(order_id: str = "", reason: str = "", user_id: str = "
     if not ok:
         return ToolResult(success=False, error=note, data={"order_id": order_id, "policy": _POLICY})
 
+    # 这里只创建项目数据库退款申请，未调用支付网关；pending_review 不是钱已到账。
     refund = Refund(
+        # 业务单号由秒级时间加订单 ID 构造，不是客户端幂等键，仍需数据库唯一约束兜底。
         refund_no=f"REF{_now().strftime('%Y%m%d%H%M%S')}{order.id:03d}",
         order_id=order.id,
         user_id=order.user_id,
@@ -141,15 +150,18 @@ async def _request_refund(order_id: str = "", reason: str = "", user_id: str = "
     )
     try:
         async with async_session_factory() as session:
+            # 退款申请与订单状态更新放在同一个 PG 事务，避免只写其中一张表。
             session.add(refund)
             # _find_own_order 的 session 已关闭，这里的 order 是游离对象，
             # 直接改字段不会被持久化，必须在新 session 里取回再更新
             db_order = await session.get(Order, order.id)
+            # 当前未对订单行加锁/版本条件；并发状态变化的校验仍不完整。
             db_order.status = "refunding"
             await session.commit()
     except IntegrityError:
-        # 同一订单已有未终态退款单：恢复/重试导致的重复提交在这里天然幂等
+        # 主要用部分唯一索引防同订单重复未终态退款；此处捕获了所有 IntegrityError，未进一步区分约束。
         async with async_session_factory() as session:
+            # 异常分支读最近退款，未限定未终态；其他 IntegrityError 也可能误被解释成已受理。
             existing = (await session.execute(
                 select(Refund).where(Refund.order_id == order.id).order_by(Refund.id.desc())
             )).scalars().first()
@@ -164,6 +176,7 @@ async def _request_refund(order_id: str = "", reason: str = "", user_id: str = "
             },
         )
 
+    # 业务事务已先提交，审计单独提交；审计失败不会撤销已创建退款。
     await record_audit(
         action="refund_submitted",
         entity_type="refund",
@@ -232,6 +245,7 @@ def register_after_sales_tools(agent_id: int = 3) -> None:
             parameters=[
                 ToolParameterDef("order_id", "string", "订单编号", is_required=True),
             ],
+            # 这里只从服务端上下文传身份；工具 schema 不要求模型自己编一个用户号。
             context_params=["user_id"],
         ),
         _check_logistics,
@@ -246,6 +260,7 @@ def register_after_sales_tools(agent_id: int = 3) -> None:
             parameters=[
                 ToolParameterDef("order_id", "string", "订单编号", is_required=True),
             ],
+            # 这里只从服务端上下文传身份；工具 schema 不要求模型自己编一个用户号。
             context_params=["user_id"],
         ),
         _query_order,
@@ -261,6 +276,7 @@ def register_after_sales_tools(agent_id: int = 3) -> None:
                 ToolParameterDef("order_id", "string", "订单编号", is_required=True),
                 ToolParameterDef("reason", "string", "退款原因（如：质量问题、不想要了等）", is_required=True),
             ],
+            # 这里只从服务端上下文传身份；工具 schema 不要求模型自己编一个用户号。
             context_params=["user_id"],
         ),
         _request_refund,
@@ -275,6 +291,7 @@ def register_after_sales_tools(agent_id: int = 3) -> None:
             parameters=[
                 ToolParameterDef("refund_id", "string", "退款单号", is_required=True),
             ],
+            # 这里只从服务端上下文传身份；工具 schema 不要求模型自己编一个用户号。
             context_params=["user_id"],
         ),
         _check_refund_status,
