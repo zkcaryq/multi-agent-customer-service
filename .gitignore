@@ -44,3 +44,7 @@ htmlcov/
 # 向量库/索引本地数据
 backend/data/
 backend/.venv/
+
+# uv 在错误工作目录执行时产生的临时依赖文件（根目录 pyproject.toml / uv.lock 才是依赖真源）
+/backend/uv.lock
+/backend/pyproject.toml.broken-uv-artifact

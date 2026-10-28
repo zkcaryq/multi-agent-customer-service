@@ -178,7 +178,7 @@ def _guard_routing(user_query: str, target: str) -> str:
     return "after_sales" if wants_refund and not wants_complaint else target
 
 
-# ── Keyword fallback (kept from original implementation) ──────────────────────
+# ── Keyword fallback ─────────────────────────────────────────────────────────
 
 # 关键词表：每条是（词表, 意图名, Agent 名）。
 # 打分方式见 _classify_keyword：命中数 / 词表长度，偏向"短词表且全中"的类别。
